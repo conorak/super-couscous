@@ -1,0 +1,421 @@
+%matplotlib inline
+import matplotlib.pyplot as plt
+import numpy as np
+from numpy import linalg as LA
+from IPython.display import HTML
+import random
+import time
+
+start_time = time.time()
+#==Constants==
+ep_aa = 5.; ep_bb = 6.; ep_ab = 4.5; gam_aa = 0.8; gam_bb = 0.7; gam_ab = 0.85
+nu_aa = 1.95; nu_bb = 0.7; nu_ab = 1.9
+a = 1.3 #lattice constant
+beta = 1
+#=============
+
+#==Simulation-Dependent Parameters======
+N = 10; M=10; Ntot = N*M #define size and shape of lattice
+N_A = 0.25 #concentration of A atoms
+N_B = 0.75 #concentration of B atoms
+H_A = 0.2 #self-Hamiltonian of atom A
+H_B = 0.25 #self-Hamiltonian of atom B
+#======================================
+
+def potential(a): #calculate potential
+    V_AB = ep_ab*(((gam_ab/a)**6)-np.exp(-(a/nu_ab)))
+    V_AA = ep_aa*(((gam_aa/a)**6)-np.exp(-(a/nu_aa)))
+    V_BB = ep_bb*(((gam_bb/a)**6)-np.exp(-(a/nu_bb)))
+    return V_AB,V_AA,V_BB
+
+def initLatt(): #Creates basic adjacency matrix
+    H = np.zeros([Ntot,Ntot]); R = np.diagflat(2*np.ones(N)) + np.diagflat(np.ones(N-1),-1)+np.diagflat(np.ones(N-1),1)
+    R[0][N-1] = 1; R[N-1][0] = 1
+    for i in range(N):
+        H[i*N:i*N+N,i*N:i*N+N] = R
+        if i!=N-1:
+            H[i*N:i*N+N,i*N+N:i*N+2*N] = np.diagflat(-1*np.ones(N)); H[i*N+N:i*N+2*N,i*N:i*N+N] = np.diagflat(-1*np.ones(N))
+    H[0:N,Ntot-N:Ntot] = np.diagflat(-1*np.ones(N)); H[Ntot-N:Ntot,0:N] = np.diagflat(-1*np.ones(N))
+    return H
+
+def energy(H): #calculate free energy
+    vec = LA.eigvals(H); F=0
+    for i in range(Ntot):
+        F = F+ (1/beta)*np.log(1+np.exp(-vec[i]*beta))
+    return F
+
+def fixPot(H,atoms):#now fixes the potentials
+    for i in range(Ntot): 
+        for j in range(i+1,Ntot):
+            if i!=j:
+                if H[i][j]!=0:
+                    if atoms[i]!=atoms[j]:
+                        H[i][j] = V_AB; H[j][i] = V_AB
+                    elif atoms[i]==0:
+                        H[i][j] = V_AA; H[j][i] = V_AA
+                    else:
+                        H[i][j] = V_BB; H[j][i] = V_BB
+    return H    
+
+def makeHam(H): #initializes a random Hamiltonian given simulation parameters
+    atoms = np.zeros([Ntot]) #0=type A, 1=type B
+    if N_A!=0 and N_B!=0: #if not uniform, pick a sample to make into type B
+        flipThese = random.sample(range(0,Ntot-1),int(N_B*Ntot))
+        for i in range(Ntot):
+            if i in flipThese:
+                H[i,i] = H_B; atoms[i]=1
+            else:
+                H[i,i] = H_A
+    elif N_A==0: #if all type B
+        for i in range(Ntot):
+            atoms[i]=1; H[i][i] = H_B
+    elif N_B==0: #if all type A
+        for i in range(Ntot):
+            H[i][i] = H_A
+    H = fixPot(H,atoms); F = energy(H)
+    return H,F,atoms
+
+def flipper(H,atoms,F): #Function for flipping until lowest energy
+    tick = time.time(); count=0; count_MC=0 #record-keeping
+    dE = 1000. #set arbitrarily high energy difference
+    fail=0; f1=0; f2=0 
+    while dE>0: #while energy can still be reduced
+        count=count+1 #record-keeping
+        typeA = np.where(atoms==1); typeB = np.where(atoms==0) #list of each type
+        tA = typeA[0]; tB = typeB[0]
+        #If last pair was flipped, don't flip again. But allow pairs that failed to be reconsidered
+        if fail==0:
+            fliplist=np.zeros([1,2])
+            for i in range(len(tA)):
+                for j in range(len(tB)):
+                    fliplist = np.append(fliplist,[[tA[i],tB[j]]],axis=0)
+            np.delete(fliplist,0,0)
+        #-------------------------------------------------------------------------------------------------
+        
+        f_pair = random.randint(0,len(fliplist)-1) #Pick from the list
+        f1 = int(fliplist[f_pair,0]); f2 = int(fliplist[f_pair,1]) #Save them and remove later
+        H_new = H; atoms_new = atoms #Define prospective updated H and list of atom type
+        
+        #--Makes the actual flips--
+        H_new[f1,f1]=H_B; H[f2,f2]=H_A; atoms_new[f1] = 1; atoms_new[f2] = 0
+        #---------------------------
+        
+        H_new = fixPot(H_new,atoms_new) #updates potentials in prospective Hamiltonian
+        F_new = energy(H_new) #calculate new energy after flip
+        if F_new<F: #only accepts if lowers energy or keeps same
+            count_MC = count_MC+1 #Counts successful MC Steps
+            dE = F-F_new; H = H_new; F = F_new; atoms = atoms_new
+            fail=0
+        else: #otherwise, remove the pair from the list
+            fail=1 #Don't refresh the pair list just yet
+            fliplist = np.delete(fliplist,f_pair,0)
+        if count%1000==0 and beta==1: #updates for user, only if finding 1 configuration
+            print('There have been {:>2.2f} iterations'.format(count), ' and dE={:2.3e}'.format(dE))
+        if len(fliplist)==0: #if no more pairs will work, we are done
+            dE=0
+    return H, time.time()-tick,F,count
+
+adj = initLatt() #Create lattice
+
+#================================ENTHALPY (at a=1.3 and a=0.9, fixed temp)=================================
+firsttest=1
+if firsttest==1:
+    trial_int = int(Ntot/10) #Number of concentrations to test
+    enth = np.zeros([2,trial_int+1]); MC_steps = np.zeros([2,trial_int+1]); sample = np.zeros([Ntot,Ntot,3,2])
+    beta=10
+    for i in range(2):
+        if i==0:
+            a=1.3; V_AB,V_AA,V_BB = potential(a); print('Calculating enthalpy at different concentrations for a=1.3')
+        else:
+            a=0.9; V_AB,V_AA,V_BB = potential(a); print('Calculating enthalpy at different concentrations for a=0.9')
+
+        #--We need energy at the two full concentrations to calculate enthalpy at other concentrations--
+        N_A = 1; N_B = 0; H,F_A,atoms = makeHam(adj)
+        H_low,tock,F_A,MC_steps[i][0] = flipper(H,atoms,F_A) #free energy of all A atoms
+        N_A = 0; N_B = 1; H,F_B,atoms = makeHam(adj)
+        H_low,tock,F_B,MC_steps[i][trial_int-1] = flipper(H,atoms,F_B) #free energy of all B atoms
+        #-----------------------------------------------------------------------------------------------
+
+        for j in range(trial_int+1):
+            N_A = j/trial_int; N_B = 1-N_A #iterate concentrations
+            print('N_A={:>2.2f}'.format(N_A))
+            H,F,atoms = makeHam(adj) #create new Hamiltonian each time
+            H_low,tock,F,MC_steps[i][j] = flipper(H,atoms,F) #find energy of lowest configuration
+            enth[i][j] = F - F_A*N_A - F_B*N_B #enthalpy of formation
+            #-----------snapshots-----------
+            if j==2:
+                sample[:,:,0,i] = H_low
+            elif j==5:
+                sample[:,:,1,i] = H_low
+            elif j==8:
+                sample[:,:,2,i] = H_low
+            #--------------------------------
+#=============================================================================================================
+
+#==================ENTHALPY AT VARIED TEMPERATURES AND LATTICE CONSTANTS============
+temp=1
+if temp==1:
+    print('Starting the 4 trials differing temperature at 2 values of the lattice constant')
+    enth_temp = np.zeros([4,trial_int+1])
+    sample_temp = np.zeros([Ntot,Ntot,3,4])
+    for i in range(4):
+        if i==0:
+            a = 1.3; V_AB,V_AA,V_BB = potential(a); beta = 2
+            print('Calculating enthalpy at different concentrations for a=1.3, beta=2')
+        elif i==1:
+            a = 1.3; V_AB,V_AA,V_BB = potential(a); beta = 1/0.95
+            print('Calculating enthalpy at different concentrations for a=1.3, beta=1/0.95')
+        elif i==2:
+            a = 0.9; V_AB,V_AA,V_BB = potential(a); beta = 2
+            print('Calculating enthalpy at different concentrations for a=0.9, beta=2')
+        else:
+            a = 0.9; V_AB,V_AA,V_BB = potential(a); beta = 1/0.95
+            print('Calculating enthalpy at different concentrations for a=0.9, beta=1/0.95')
+            
+            N_A = 1; N_B = 0; H,F_A,atoms = makeHam(adj)
+            H_low,tock,F_A,steps = flipper(H,atoms,F_A) #free energy of all A atoms
+            N_A = 0; N_B = 1; H,F_B,atoms = makeHam(adj)
+            H_low,tock,F_B,steps = flipper(H,atoms,F_B) #free energy of all B atoms
+            
+        for j in range(trial_int+1):
+            N_A = j/trial_int; N_B = 1-N_A #iterate concentrations
+            print('N_A={:>2.2f}'.format(N_A))
+            H,F,atoms = makeHam(adj) #create new Hamiltonian each time
+            H_low,tock,F,steps = flipper(H,atoms,F) #find energy of lowest configuration
+            enth_temp[i][j] = F - F_A*N_A - F_B*N_B #enthalpy of formation
+
+            #-----------snapshots-----------
+            if j==2:
+                sample_temp[:,:,0,i] = H_low
+            elif j==5:
+                sample_temp[:,:,1,i] = H_low
+            elif j==8:
+                sample_temp[:,:,2,i] = H_low
+            #--------------------------------
+#====================
+
+#======CALCULATE PHASE SPACE========
+#--Set next line to 1 to see distribution of phase space--
+phaseSpace=0
+if phaseSpace==1:
+    N = 10; M=20; Ntot = N*M
+    micro = np.zeros(Ntot+1)
+    for i in range(Ntot+1):
+        micro[i] = binom(Ntot,i)
+    totHam = sum(micro)
+    print('The total number of Hamiltonians that can be constructed when ' 'N = {:>2.2f}'.format(N),
+           'and M = {:>2.2f}'.format(M), '\n' 'is {:2.3e}'.format(totHam))    
+    
+###########################################################
+##===================PLOTTING RESULTS====================##
+###########################################################
+#LaTeX plotting settings
+width = 4.2
+height = width/1.618
+x = np.arange(0,1.1,0.1)
+#------------------------------------
+
+#--SET NEXT LINE TO 1 TO PLOT DISTRIBUTION OF POSSIBLE MICROSTATES, THEN 1 TO SAVE--
+plot1=0; saveImgs1=0
+if plot1==1:  
+    fg=plt.figure(); plt.plot(micro)
+    plt.xlabel(''r'$N_A$'); plt.ylabel('Number of Hamiltonians'); plt.title('Number of Hamiltonians' '\n' 'as a function of ' ''r'$N_A$')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs1==1:
+        plt.tight_layout()
+        fg.savefig('enumerateHam.pdf')
+#-----------------------------------------------------------------------------------
+        
+#--Enthalpy as a function of concentration for a=1.3--
+plot2=1;saveImgs2=1
+if plot2==1:
+    fg=plt.figure(); plt.plot(x, enth[0][:])
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Enthalpy'); plt.title('Enthalpy as a function of ' r'$x_A$' '\n' ' when ' r'$a=1.3$' 'Å')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs2==1:
+        plt.tight_layout()
+        fg.savefig('enthalpy13.pdf')
+#----------------------------------------------------
+
+#--Enthalpy as a function of concentration for a=0.9--
+plot3 = 1; saveImgs3=1
+if plot3==1:
+    fg=plt.figure(); plt.plot(x,enth[1][:])
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Enthalpy'); plt.title('Enthalpy as a function of ' r'$x_A$'  '\n' ' when ' r'$a=0.9$' 'Å')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs3==1:
+        plt.tight_layout()
+        fg.savefig('enthalpy9.pdf')
+#----------------------------------------------------
+
+#--Plots number of MC steps for two of the simulations--
+plot4=1; saveImgs4=1
+if plot4==1:
+    fg = plt.figure(); ax = plt.subplot(1,1,1)
+    a1 = ax.plot(x,MC_steps[0][:],label='a=1.3'); a2 = ax.plot(x,MC_steps[1][:],label='a=0.9')
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Number of MC steps'); plt.title('Number of MC steps as a function' '\n' 'of ' r'$x_A$')
+    fg.set_size_inches(width*.8, height)
+    plt.legend()
+    if saveImgs4==1:
+        fg.tight_layout()
+        fg.savefig('MCSteps.pdf')
+#-------------------------------------------------------
+        
+#----Enthalpy as a function of concentration at 2 temperatures for 2 values of lattice constant----
+plot5 = 1; saveImgs5=1; plot6 = 1; saveImgs6=1; plot7 = 1; saveImgs7=1; plot8 = 1; saveImgs8=1;
+if plot5==1:
+    fg=plt.figure(); plt.plot(x,enth_temp[0][:])
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Enthalpy');
+    plt.title('Enthalpy as a function of ' r'$x_A$' '\n' ' when ' r'$a=1.3$' 'Å and ' r'$\beta^{-1} = 0.5$')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs5==1:
+        plt.tight_layout()
+        fg.savefig('enthalpy1_1.pdf')
+if plot6==1:
+    fg=plt.figure(); plt.plot(x,enth_temp[1][:])
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Enthalpy');
+    plt.title('Enthalpy as a function of ' r'$x_A$' '\n' ' when ' r'$a=1.3$' 'Å and ' r'$\beta^{-1} = 0.95$')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs6==1:
+        plt.tight_layout()
+        fg.savefig('enthalpy1_2.pdf')
+if plot7==1:
+    fg=plt.figure(); plt.plot(x,enth_temp[2][:])
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Enthalpy');
+    plt.title('Enthalpy as a function of ' r'$x_A$' '\n'  ' when ' r'$a=0.9$' 'Å and ' r'$\beta^{-1} = 0.5$')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs5==1:
+        plt.tight_layout()
+        fg.savefig('enthalpy1_3.pdf')
+if plot8==1:
+    fg=plt.figure(); plt.plot(x,enth_temp[3][:])
+    plt.xlabel(''r'$x_A$'); plt.ylabel('Enthalpy');
+    plt.title('Enthalpy as a function of ' r'$x_A$' '\n' ' when ' r'$a=0.9$' 'Å and ' r'$\beta^{-1} = 0.95$')
+    fg.set_size_inches(width*.8, height)
+    if saveImgs8==1:
+        plt.tight_layout()
+        fg.savefig('enthalpy1_4.pdf')
+#-----------------------------------------------------------------------------------------------------
+#=========================================
+#================SNAPSHOTS================
+#=========================================
+
+def makeGrid(B): #This makes the grid for plotting the actual lattice
+    x = np.zeros([len(B)])
+    y = np.zeros([len(B)])
+    pointsA = []; pointsB=[]
+    for i in range(len(B)):
+        if B[i][i]==0.2:
+            pointA = np.array([i%N, i//N])
+            pointsA.append(pointA)
+        elif B[i][i]==0.25:
+            pointB = np.array([i%N, i//N])
+            pointsB.append(pointB)
+    return pointsA,pointsB
+
+#--This part handles the first two samples--
+snap1 = 1; saveSnap1=1; snap2 = 1; saveSnap2=1; #--deals with fixed temperature trials--
+if snap1==1:
+    fg=plt.figure(); ax1=plt.subplot(1,3,1); ax2=plt.subplot(1,3,2); ax3=plt.subplot(1,3,3)
+    latt1 = sample[:,:,0,0]; latt2 = sample[:,:,1,0]; latt3 = sample[:,:,2,0]
+    nodes1A,nodes1B = makeGrid(latt1); nodes2A,nodes2B = makeGrid(latt2); nodes3A,nodes3B = makeGrid(latt3)
+    ax1.scatter(*zip(*nodes1A),c='b'); ax1.scatter(*zip(*nodes1B),c='r')
+    ax2.scatter(*zip(*nodes2A),c='b'); ax2.scatter(*zip(*nodes2B),c='r')
+    ax3.scatter(*zip(*nodes3A),c='b'); ax3.scatter(*zip(*nodes3B),c='r')
+    ax1.set_xticks([]); ax1.set_yticks([]); ax2.set_xticks([]); ax2.set_yticks([]); ax3.set_xticks([]); ax3.set_yticks([])
+    ax1.title.set_text(r'$x_A=0.2$'); ax2.title.set_text(r'$x_A=0.5$'); ax3.title.set_text(r'$x_A=0.8$')
+    fg.set_size_inches(width*.5*3,height)
+    fgTitle=('Snapshots of lattice at different concentrations when a=1.3 and ' r'$\beta^{-1}$ = 0.1eV')
+    plt.text(0.5, 1.14, fgTitle,
+             horizontalalignment='center',
+             fontsize=12,
+             transform = ax2.transAxes)
+    if saveSnap1==1:
+        plt.tight_layout()
+        fg.savefig('snap1.pdf')
+
+if snap2==1:
+    fg=plt.figure(); ax1=plt.subplot(1,3,1); ax2=plt.subplot(1,3,2); ax3=plt.subplot(1,3,3)
+    latt1 = sample[:,:,0,1]; latt2 = sample[:,:,1,1]; latt3 = sample[:,:,2,1]
+    nodes1A,nodes1B = makeGrid(latt1); nodes2A,nodes2B = makeGrid(latt2); nodes3A,nodes3B = makeGrid(latt3)
+    ax1.scatter(*zip(*nodes1A),c='b'); ax1.scatter(*zip(*nodes1B),c='r')
+    ax2.scatter(*zip(*nodes2A),c='b'); ax2.scatter(*zip(*nodes2B),c='r')
+    ax3.scatter(*zip(*nodes3A),c='b'); ax3.scatter(*zip(*nodes3B),c='r')
+    ax1.set_xticks([]); ax1.set_yticks([]); ax2.set_xticks([]); ax2.set_yticks([]); ax3.set_xticks([]); ax3.set_yticks([])
+    ax1.title.set_text(r'$x_A=0.2$'); ax2.title.set_text(r'$x_A=0.5$'); ax3.title.set_text(r'$x_A=0.8$')
+    fg.set_size_inches(width*.5*3,height)
+    fgTitle=('Snapshots of lattice at different concentrations when a=0.9 and ' r'$\beta^{-1}$ = 0.1eV')
+    plt.text(0.5, 1.14, fgTitle,
+             horizontalalignment='center',
+             fontsize=12,
+             transform = ax2.transAxes)
+    plt.tight_layout()
+    fg.savefig('snap2.pdf')
+        
+
+#--This part handles the temperature samples--
+tempsamples=1
+if tempsamples==1:
+    for i in range(4):
+        fg=plt.figure(); ax1=plt.subplot(1,3,1); ax2=plt.subplot(1,3,2); ax3=plt.subplot(1,3,3)
+        latt1 = sample_temp[:,:,0,i]; latt2 = sample_temp[:,:,1,i]; latt3 = sample_temp[:,:,2,i]
+        nodes1A,nodes1B = makeGrid(latt1); nodes2A,nodes2B = makeGrid(latt2); nodes3A,nodes3B = makeGrid(latt3)
+        ax1.scatter(*zip(*nodes1A),c='b'); ax1.scatter(*zip(*nodes1B),c='r')
+        ax2.scatter(*zip(*nodes2A),c='b'); ax2.scatter(*zip(*nodes2B),c='r')
+        ax3.scatter(*zip(*nodes3A),c='b'); ax3.scatter(*zip(*nodes3B),c='r')
+        ax1.set_xticks([]); ax1.set_yticks([]); ax2.set_xticks([]); ax2.set_yticks([]); ax3.set_xticks([]); ax3.set_yticks([])
+        ax1.title.set_text(r'$x_A=0.2$'); ax2.title.set_text(r'$x_A=0.5$'); ax3.title.set_text(r'$x_A=0.8$')
+        fg.set_size_inches(width*.5*3,height)
+        if i==0:
+            fgTitle=('Snapshots of lattice at different concentrations when a=1.3 and ' r'$\beta^{-1}$ = 0.5eV')
+            plt.text(0.5, 1.14, fgTitle,
+                 horizontalalignment='center',
+                 fontsize=12,
+                 transform = ax2.transAxes)
+            plt.tight_layout()
+            fg.savefig('snap3.pdf')
+        elif i==1:
+            fgTitle=('Snapshots of lattice at different concentrations when a=1.3 and ' r'$\beta^{-1}$ = 0.95eV')
+            plt.text(0.5, 1.14, fgTitle,
+                 horizontalalignment='center',
+                 fontsize=12,
+                 transform = ax2.transAxes)
+            plt.tight_layout()
+            fg.savefig('snap4.pdf')
+        elif i==2:
+            fgTitle=('Snapshots of lattice at different concentrations when a=0.9 and ' r'$\beta^{-1}$ = 0.5eV')
+            plt.text(0.5, 1.14, fgTitle,
+                 horizontalalignment='center',
+                 fontsize=12,
+                 transform = ax2.transAxes)
+            plt.tight_layout()
+            fg.savefig('snap5.pdf')
+        elif i==3:
+            fgTitle=('Snapshots of lattice at different concentrations when a=0.9 and ' r'$\beta^{-1}$ = 0.95eV')
+            plt.text(0.5, 1.14, fgTitle,
+                 horizontalalignment='center',
+                 fontsize=12,
+                 transform = ax2.transAxes)
+            plt.tight_layout()
+            fg.savefig('snap6.pdf')
+
+#--Finally, a look at the first lattice considered in the project--
+#====LOWEST ENERGY CONFIGURATION====
+lowconf_25=1 #set to 1 to create lowest energy configuration for "default" settings
+if lowconf_25==1:
+    N_A = 0.25; N_B=0.75; beta=1;a=1.3; V_AB,V_AA,V_BB = potential(a);
+    H,F,atoms = makeHam(adj) #create random Hamiltonian
+    H25, tock,F,steps = flipper(H,atoms,F) #find lowest configuration
+#=====================
+
+if lowconf_25==1:
+    fg=plt.figure()
+    nodes1A,nodes1B = makeGrid(H25)
+    plt.scatter(*zip(*nodes1A),c='b'); plt.scatter(*zip(*nodes1B),c='r')
+    plt.set_xticks([]); plt.set_yticks([])
+    fg.set_size_inches(width*.8,height)
+    plt.title('Square lattice, ' r'$x_A = 25$' ' a=1.3 Å' '\n' ' and ' r'$\beta^{-1} = 1$')
+    plt.tight_layout()
+    fg.savefig('snap25_75.pdf')
+
+#=========================================================================================================
